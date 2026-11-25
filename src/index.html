@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aligator</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="explorer">
+      <header class="address-bar">
+        <nav class="nav-buttons" aria-label="Navigation">
+          <button id="back-button" class="nav-button" type="button" title="Back" aria-label="Back" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>
+          </button>
+          <button id="forward-button" class="nav-button" type="button" title="Forward" aria-label="Forward" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+          <button id="up-button" class="nav-button" type="button" title="Up to parent folder" aria-label="Up to parent folder" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+          </button>
+        </nav>
+        <input id="address-input" type="text" placeholder="Enter a path..." spellcheck="false" autocomplete="off" />
+      </header>
+
+      <div class="workspace">
+        <aside class="left-panel" id="left-panel" tabindex="0">Left Panel</aside>
+        <main class="right-panel" id="right-panel" tabindex="0"></main>
+      </div>
+
+      <footer class="status-bar" id="status-bar">Ready</footer>
+    </div>
+  </body>
+</html>
