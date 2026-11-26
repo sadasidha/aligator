@@ -15,6 +15,35 @@ pub(crate) enum ImageTransform {
     Rotate90,
     FlipVertical,
     FlipHorizontal,
+    Crop(CropRect),
+}
+
+/// A crop area as fractions (0..=1) of the image's size at the point it is applied.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub(crate) struct CropRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl CropRect {
+    /// Converts to `(x, y, width, height)` in pixels, clamped to the image bounds.
+    fn to_pixels(self, image_width: u32, image_height: u32) -> Result<(u32, u32, u32, u32), AppErr> {
+        let values = [self.x, self.y, self.width, self.height];
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(AppErr::new("Invalid crop area"));
+        }
+        let edge = |fraction: f64, size: u32| (fraction.clamp(0.0, 1.0) * f64::from(size)).round() as u32;
+        let left = edge(self.x, image_width);
+        let top = edge(self.y, image_height);
+        let right = edge(self.x + self.width, image_width);
+        let bottom = edge(self.y + self.height, image_height);
+        if right <= left || bottom <= top {
+            return Err(AppErr::new("The crop area is empty"));
+        }
+        Ok((left, top, right - left, bottom - top))
+    }
 }
 
 impl From<image::ImageError> for AppErr {
@@ -60,6 +89,10 @@ pub(crate) fn transform_image(
             ImageTransform::Rotate90 => image.rotate90(),
             ImageTransform::FlipVertical => image.flipv(),
             ImageTransform::FlipHorizontal => image.fliph(),
+            ImageTransform::Crop(rect) => {
+                let (x, y, width, height) = rect.to_pixels(image.width(), image.height())?;
+                image.crop_imm(x, y, width, height)
+            }
         };
     }
 
@@ -94,4 +127,29 @@ fn write_image(image: &DynamicImage, path: &Path, format: ImageFormat) -> Result
     }
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CropRect;
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> CropRect {
+        CropRect { x, y, width, height }
+    }
+
+    #[test]
+    fn crop_rect_rounds_to_pixels() {
+        assert_eq!(rect(0.25, 0.5, 0.5, 0.25).to_pixels(200, 100).ok(), Some((50, 50, 100, 25)));
+    }
+
+    #[test]
+    fn crop_rect_is_clamped_to_the_image() {
+        assert_eq!(rect(-0.2, 0.9, 1.5, 0.5).to_pixels(100, 100).ok(), Some((0, 90, 100, 10)));
+    }
+
+    #[test]
+    fn crop_rect_rejects_empty_or_invalid_areas() {
+        assert!(rect(0.5, 0.5, 0.001, 0.5).to_pixels(100, 100).is_err());
+        assert!(rect(f64::NAN, 0.0, 1.0, 1.0).to_pixels(100, 100).is_err());
+    }
 }

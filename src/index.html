@@ -4,12 +4,12 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Aligator</title>
+    <title>Image Editor</title>
     <script type="module" src="/main.js" defer></script>
   </head>
 
   <body>
-    <div class="explorer">
+    <div class="explorer" id="explorer">
       <header class="address-bar">
         <nav class="nav-buttons" aria-label="Navigation">
           <button id="back-button" class="nav-button" type="button" title="Back" aria-label="Back" disabled>
@@ -23,6 +23,12 @@
           </button>
         </nav>
         <input id="address-input" type="text" placeholder="Enter a path..." spellcheck="false" autocomplete="off" />
+        <div class="search-box" role="search">
+          <input id="search-input" type="search" placeholder="Search this folder..." spellcheck="false" autocomplete="off" aria-label="Search this folder" />
+          <button id="search-button" class="nav-button" type="button" title="Search" aria-label="Search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+          </button>
+        </div>
       </header>
 
       <div class="workspace">
@@ -31,6 +37,12 @@
       </div>
 
       <footer class="status-bar" id="status-bar">Ready</footer>
+    </div>
+    <div class="busy-overlay" id="busy-overlay" tabindex="-1" role="alertdialog" aria-modal="true" aria-live="assertive" hidden>
+      <div class="busy-box">
+        <span class="busy-spinner" aria-hidden="true"></span>
+        <span id="busy-message">Saving…</span>
+      </div>
     </div>
   </body>
 </html>

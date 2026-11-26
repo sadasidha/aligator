@@ -37,3 +37,11 @@ pub enum FileFolder {
     FileDef(FileDef),
     Inaccessible(Inaccessible),
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    pub(crate) entries: Vec<FileFolder>,
+    /// True when the match limit was reached before the whole tree was searched.
+    pub(crate) truncated: bool,
+}

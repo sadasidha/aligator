@@ -100,6 +100,30 @@ body {
   border-color: #396cd8;
 }
 
+.search-box {
+  flex: 0 1 260px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 140px;
+}
+
+#search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font: inherit;
+  color: inherit;
+  background-color: #ffffff;
+  outline: none;
+}
+
+#search-input:focus {
+  border-color: #396cd8;
+}
+
 .workspace {
   flex: 1 1 auto;
   display: flex;
@@ -269,8 +293,86 @@ body {
   margin-left: 8px;
 }
 
-.image-save-group[hidden] {
+.image-save-group[hidden],
+.image-tool-group[hidden] {
   display: none;
+}
+
+.image-tool-group {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.crop-overlay {
+  position: absolute;
+  z-index: 1;
+  cursor: crosshair;
+  touch-action: none;
+  outline: none;
+  user-select: none;
+}
+
+.crop-overlay[hidden] {
+  display: none;
+}
+
+.crop-shade,
+.crop-box {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+/* Clips the shade's shadow so the dimming stays within the image. */
+.crop-mask {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.crop-shade {
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.5);
+}
+
+.crop-box {
+  border: 1px solid #ffffff;
+  outline: 1px dashed rgba(0, 0, 0, 0.6);
+  outline-offset: -1px;
+  cursor: move;
+}
+
+.crop-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -6px 0 0 -6px;
+  border: 1px solid #396cd8;
+  border-radius: 2px;
+  background-color: #ffffff;
+}
+
+.crop-handle[data-handle="nw"] { left: 0; top: 0; cursor: nwse-resize; }
+.crop-handle[data-handle="n"] { left: 50%; top: 0; cursor: ns-resize; }
+.crop-handle[data-handle="ne"] { left: 100%; top: 0; cursor: nesw-resize; }
+.crop-handle[data-handle="e"] { left: 100%; top: 50%; cursor: ew-resize; }
+.crop-handle[data-handle="se"] { left: 100%; top: 100%; cursor: nwse-resize; }
+.crop-handle[data-handle="s"] { left: 50%; top: 100%; cursor: ns-resize; }
+.crop-handle[data-handle="sw"] { left: 0; top: 100%; cursor: nesw-resize; }
+.crop-handle[data-handle="w"] { left: 0; top: 50%; cursor: ew-resize; }
+
+.crop-size {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #ffffff;
+  background-color: rgba(0, 0, 0, 0.6);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  translate: -50% -50%;
 }
 
 .text-button {
@@ -302,6 +404,11 @@ body {
   container-type: size;
 }
 
+/* Leaves room for crop handles when the image fills the frame. */
+.editable-frame {
+  padding: 6px;
+}
+
 .file-frame {
   align-items: center;
   justify-content: center;
@@ -325,11 +432,29 @@ body {
 .preview-caption {
   flex: none;
   padding-top: 8px;
-  overflow: hidden;
-  font-size: 13px;
   text-align: center;
+}
+
+.preview-name,
+.preview-info {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.preview-name {
+  font-size: 13px;
+}
+
+.preview-info {
+  padding-top: 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+}
+
+.preview-info[hidden] {
+  display: none;
 }
 
 .image-view {
@@ -348,6 +473,50 @@ body {
 .image-view.quarter-turn {
   max-width: 100cqh;
   max-height: 100cqw;
+}
+
+.pdf-toolbar[hidden] {
+  display: none;
+}
+
+.pdf-page-input {
+  min-width: 5ch;
+  height: 24px;
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: inherit;
+  background-color: transparent;
+  outline: none;
+}
+
+.pdf-page-input:focus {
+  border-color: #396cd8;
+}
+
+.pdf-page-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.pdf-edit-group {
+  margin-left: 12px;
+}
+
+.pdf-page {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: block;
+  translate: -50% -50%;
+  background-color: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
 .video-view {
@@ -417,13 +586,67 @@ body {
   opacity: 0.75;
 }
 
+.busy-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.25);
+  cursor: progress;
+  outline: none;
+}
+
+.busy-overlay[hidden] {
+  display: none;
+}
+
+.busy-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 80vw;
+  padding: 12px 18px;
+  overflow: hidden;
+  border-radius: 6px;
+  color: #0f0f0f;
+  background-color: #ffffff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.busy-spinner {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(57, 108, 216, 0.25);
+  border-top-color: #396cd8;
+  border-radius: 50%;
+  animation: busy-spin 0.8s linear infinite;
+}
+
+@keyframes busy-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
+  .busy-box {
+    color: #f6f6f6;
+    background-color: #2f2f2f;
+  }
+
   :root {
     color: #f6f6f6;
     background-color: #2f2f2f;
   }
 
-  #address-input {
+  #address-input,
+  #search-input {
     background-color: #1e1e1e;
   }
 

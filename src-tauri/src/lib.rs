@@ -4,7 +4,10 @@ mod services;
 
 use std::path::PathBuf;
 
-use models::{files_folder::FileFolder, settings::Settings};
+use models::{
+    files_folder::{FileFolder, SearchResult},
+    settings::Settings,
+};
 use services::image_edit::{self, ImageTransform};
 use services::video;
 use tauri::Manager;
@@ -42,6 +45,17 @@ async fn load_file_folder(path: String) -> Result<Vec<FileFolder>, String> {
         .map_err(|error| error.to_string())
 }
 
+const SEARCH_LIMIT: usize = 1000;
+
+#[tauri::command]
+async fn search_file_folder(path: String, query: String) -> Result<SearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || FileFolder::search(path, &query, SEARCH_LIMIT))
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|(entries, truncated)| SearchResult { entries, truncated })
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn open_with_default_app(path: String) -> Result<(), String> {
     tauri_plugin_opener::open_path(&path, None::<&str>)
@@ -63,6 +77,20 @@ async fn transform_image(
 }
 
 #[tauri::command]
+async fn transform_pdf(
+    path: String,
+    edits: Vec<services::pdf_edit::PageEdit>,
+    destination: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        services::pdf_edit::transform_pdf(&path, &edits, destination.as_deref())
+    })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn read_text_preview(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || services::text_preview::read_text_preview(&path))
         .await
@@ -73,6 +101,19 @@ async fn read_text_preview(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn video_open(path: String, max_width: u32, max_height: u32) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || video::open(&path, max_width, max_height))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn video_info(id: u64) -> Result<video::VideoInfo, String> {
+    video::info(id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn file_info(path: String) -> Result<services::file_info::FileInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || services::file_info::file_info(&path))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -149,10 +190,14 @@ pub fn run() {
             load_current_path,
             save_current_path,
             load_file_folder,
+            search_file_folder,
             open_with_default_app,
             transform_image,
+            transform_pdf,
             read_text_preview,
             video_open,
+            video_info,
+            file_info,
             video_play,
             video_pause,
             video_seek,

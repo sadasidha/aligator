@@ -42,7 +42,10 @@ const STATE_PLAYING: c_int = 3;
 const STATE_PAUSED: c_int = 4;
 const STATE_ENDED: c_int = 6;
 const STATE_ERROR: c_int = 7;
+const TRACK_AUDIO: c_int = 0;
 const TRACK_VIDEO: c_int = 1;
+// libvlc_video_orient_t values from here on swap width and height.
+const ORIENT_TRANSPOSED: c_int = 4;
 
 #[repr(C)]
 struct MediaTrack {
@@ -65,6 +68,16 @@ struct VideoTrack {
     width: c_uint,
     sar_num: c_uint,
     sar_den: c_uint,
+    frame_rate_num: c_uint,
+    frame_rate_den: c_uint,
+    orientation: c_int,
+}
+
+// Leading fields of libvlc_audio_track_t; only read through a pointer.
+#[repr(C)]
+struct AudioTrack {
+    channels: c_uint,
+    rate: c_uint,
 }
 
 struct Vlc {
@@ -454,6 +467,92 @@ pub(crate) fn seek(id: u64, time_ms: i64) -> Result<(), AppErr> {
         (vlc.player_set_time)(session.player, time_ms.max(0));
     }
     Ok(())
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VideoInfo {
+    /// Display size in pixels, after any rotation flag; 0 when unknown.
+    width: u32,
+    height: u32,
+    frame_rate: Option<f64>,
+    video_codec: Option<String>,
+    /// Bits per second, when the container reports it.
+    video_bitrate: Option<u32>,
+    audio_codec: Option<String>,
+    audio_channels: Option<u32>,
+    audio_sample_rate: Option<u32>,
+}
+
+/// Describes the first video and audio tracks of an open video.
+pub(crate) fn info(id: u64) -> Result<VideoInfo, AppErr> {
+    let session = session(id)?;
+    let vlc = session.vlc;
+    let mut tracks = std::ptr::null_mut();
+    let count = unsafe { (vlc.media_tracks_get)(session.sink().media, &mut tracks) };
+    let mut info = VideoInfo::default();
+    for index in 0..count as usize {
+        let track = unsafe { &**tracks.add(index) };
+        if track.details.is_null() {
+            continue;
+        }
+        match track.kind {
+            TRACK_VIDEO if info.video_codec.is_none() => {
+                let video = unsafe { &*(track.details as *const VideoTrack) };
+                let sar = if video.sar_num > 0 && video.sar_den > 0 {
+                    f64::from(video.sar_num) / f64::from(video.sar_den)
+                } else {
+                    1.0
+                };
+                let (width, height) = ((f64::from(video.width) * sar).round() as u32, video.height);
+                (info.width, info.height) =
+                    if video.orientation >= ORIENT_TRANSPOSED { (height, width) } else { (width, height) };
+                info.frame_rate = (video.frame_rate_num > 0 && video.frame_rate_den > 0)
+                    .then(|| f64::from(video.frame_rate_num) / f64::from(video.frame_rate_den));
+                info.video_codec = codec_name(track.codec);
+                info.video_bitrate = (track.bitrate > 0).then_some(track.bitrate);
+            }
+            TRACK_AUDIO if info.audio_codec.is_none() => {
+                let audio = unsafe { &*(track.details as *const AudioTrack) };
+                info.audio_codec = codec_name(track.codec);
+                info.audio_channels = (audio.channels > 0).then_some(audio.channels);
+                info.audio_sample_rate = (audio.rate > 0).then_some(audio.rate);
+            }
+            _ => {}
+        }
+    }
+    if count > 0 {
+        unsafe { (vlc.media_tracks_release)(tracks, count) };
+    }
+    Ok(info)
+}
+
+/// Turns a libVLC codec fourcc into a readable name.
+fn codec_name(fourcc: u32) -> Option<String> {
+    let raw: String = fourcc.to_le_bytes().iter().map(|&byte| byte as char).collect();
+    let raw = raw.trim_matches(|c: char| c == '\0' || c == ' ');
+    let name = match raw {
+        "" => return None,
+        "h264" => "H.264",
+        "hevc" => "H.265 (HEVC)",
+        "av01" => "AV1",
+        "VP80" => "VP8",
+        "VP90" => "VP9",
+        "mpgv" => "MPEG-2",
+        "mp4v" => "MPEG-4",
+        "MJPG" => "Motion JPEG",
+        "mp4a" => "AAC",
+        "mpga" => "MP3",
+        "a52" => "AC-3",
+        "eac3" => "E-AC-3",
+        "opus" | "Opus" => "Opus",
+        "vorb" => "Vorbis",
+        "flac" => "FLAC",
+        "alac" => "ALAC",
+        other if other.starts_with('s') || other.starts_with('u') || other == "araw" || other.starts_with('f') => "PCM",
+        other => return Some(other.to_uppercase()),
+    };
+    Some(name.to_string())
 }
 
 #[derive(Serialize)]

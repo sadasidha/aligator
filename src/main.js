@@ -8,6 +8,25 @@ window.addEventListener("DOMContentLoaded", async () => {
   const backButtonEl = document.querySelector("#back-button");
   const forwardButtonEl = document.querySelector("#forward-button");
   const upButtonEl = document.querySelector("#up-button");
+  const searchInputEl = document.querySelector("#search-input");
+  const searchButtonEl = document.querySelector("#search-button");
+  const explorerEl = document.querySelector("#explorer");
+  const busyOverlayEl = document.querySelector("#busy-overlay");
+  const busyMessageEl = document.querySelector("#busy-message");
+
+  // Blocks all mouse and keyboard input to the window until the returned function is called.
+  function lockWindow(message) {
+    const focusedEl = document.activeElement;
+    explorerEl.inert = true;
+    busyMessageEl.textContent = message;
+    busyOverlayEl.hidden = false;
+    busyOverlayEl.focus();
+    return () => {
+      explorerEl.inert = false;
+      busyOverlayEl.hidden = true;
+      if (focusedEl?.isConnected) focusedEl.focus();
+    };
+  }
 
   const history = [];
   let historyIndex = -1;
@@ -109,14 +128,55 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // Searches recursively under the current folder and shows the matches as a grid.
+  async function search() {
+    const query = searchInputEl.value.trim();
+    const path = historyIndex >= 0 ? history[historyIndex] : null;
+    if (!query || path === null) return;
+
+    // Searching replaces the preview, so stale previews and older searches are ignored.
+    const requestId = nextPreview();
+    for (const selectedEl of leftPanelEl.querySelectorAll(".entry.selected")) {
+      selectedEl.classList.remove("selected");
+      selectedEl.setAttribute("aria-selected", "false");
+    }
+    const messageEl = document.createElement("p");
+    messageEl.className = "grid-message";
+    messageEl.textContent = `Searching for “${query}”…`;
+    rightPanelEl.replaceChildren(messageEl);
+    statusBarEl.textContent = `Searching ${baseName(path)}…`;
+
+    try {
+      const { entries, truncated } = await window.__TAURI__.core.invoke("search_file_folder", { path, query });
+      if (requestId !== previewId) return;
+      renderGrid(rightPanelEl, entries, { emptyMessage: `No results for “${query}”` });
+      rightPanelEl.scrollTop = 0;
+      statusBarEl.textContent = truncated
+        ? `Showing the first ${entries.length} results for “${query}”`
+        : `${entries.length} results for “${query}”`;
+    } catch (error) {
+      if (requestId !== previewId) return;
+      console.error("Search failed:", error);
+      messageEl.textContent = `Could not search ${baseName(path)}`;
+      statusBarEl.textContent = `Search failed in ${path}`;
+    }
+  }
+
+  searchButtonEl.addEventListener("click", search);
+  searchInputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.repeat) {
+      search();
+    }
+  });
+
   // Ignores responses for folders that are no longer selected.
   let previewId = 0;
-  // Releases the libVLC player behind the current preview, if any.
-  let stopActiveVideo = null;
+  // Releases resources held by the current preview (libVLC player, PDF document), if any.
+  let stopActivePreview = null;
 
   function nextPreview() {
-    stopActiveVideo?.();
-    stopActiveVideo = null;
+    stopActivePreview?.();
+    stopActivePreview = null;
     return ++previewId;
   }
 
@@ -130,11 +190,12 @@ window.addEventListener("DOMContentLoaded", async () => {
     flipVertical: { label: "Flip vertically", icon: '<path d="M4 12h16M8 8l4-4 4 4M8 16l4 4 4-4"/>' },
     flipHorizontal: { label: "Flip horizontally", icon: '<path d="M12 4v16M8 8l-4 4 4 4M16 8l4 4-4 4"/>' },
   };
+  const CROP_ICON = '<path d="M6 2v14a2 2 0 0 0 2 2h14M2 6h14a2 2 0 0 1 2 2v14"/>';
   const SAVABLE_EXTENSIONS = ["png", "jpg", "jpeg", "bmp", "tif", "tiff"];
 
   async function alertDialog(message) {
     const dialog = window.__TAURI__.dialog;
-    return dialog ? dialog.message(message, { title: "Aligator", kind: "error" }) : window.alert(message);
+    return dialog ? dialog.message(message, { title: "Image Editor", kind: "error" }) : window.alert(message);
   }
 
   function editedCopyPath(path) {
@@ -161,7 +222,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     toolbarEl.className = "image-toolbar";
 
     const frameEl = document.createElement("div");
-    frameEl.className = "image-frame";
+    frameEl.className = "image-frame editable-frame";
     const imageEl = document.createElement("img");
     imageEl.className = "image-view";
     imageEl.alt = name;
@@ -174,6 +235,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     });
     imageEl.src = imageSrc(path);
     frameEl.append(imageEl);
+
+    const caption = previewCaption(path);
 
     // Edits are only previewed until the user saves them.
     let pending = [];
@@ -205,20 +268,25 @@ window.addEventListener("DOMContentLoaded", async () => {
       saveGroupEl.hidden = pending.length === 0;
     }
 
-    function setBusy(busy) {
-      toolbarEl.querySelectorAll("button").forEach((el) => (el.disabled = busy));
+    let busy = false;
+    function setBusy(value) {
+      busy = value;
+      toolbarEl.querySelectorAll("button").forEach((el) => (el.disabled = value));
     }
 
-    async function save(destination) {
+    async function save(destination, transforms = pending) {
       setBusy(true);
+      let unlockWindow = lockWindow(`Saving ${baseName(destination ?? path)}…`);
       try {
-        await window.__TAURI__.core.invoke("transform_image", { path, transforms: pending, destination });
+        await window.__TAURI__.core.invoke("transform_image", { path, transforms, destination });
+        exitCrop();
         if (destination) {
           setPending([]);
           statusBarEl.textContent = `Saved as ${baseName(destination)}`;
         } else {
           saveGroupEl.hidden = true;
           statusBarEl.textContent = `Saved ${name}`;
+          caption.refresh();
           // Decode the saved file off-screen, then swap it in without animating the preview transform away.
           const savedSrc = imageSrc(path);
           const loaderEl = new Image();
@@ -231,39 +299,20 @@ window.addEventListener("DOMContentLoaded", async () => {
           imageEl.style.transition = "";
         }
       } catch (error) {
+        unlockWindow();
+        unlockWindow = () => {};
         console.error("Could not save image:", error);
+        exitCrop();
         setPending([]);
         statusBarEl.textContent = `Failed to save ${name}`;
         await alertDialog(`Failed to save ${name}.\n${error}`);
       } finally {
+        unlockWindow();
         setBusy(false);
       }
     }
 
-    for (const [transform, { label, icon }] of Object.entries(PREVIEW_TRANSFORMS)) {
-      const buttonEl = document.createElement("button");
-      buttonEl.type = "button";
-      buttonEl.className = "nav-button";
-      buttonEl.title = label;
-      buttonEl.setAttribute("aria-label", label);
-      buttonEl.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>`;
-      buttonEl.addEventListener("click", () => setPending([...pending, transform]));
-      toolbarEl.append(buttonEl);
-    }
-
-    const saveButtonEl = document.createElement("button");
-    saveButtonEl.type = "button";
-    saveButtonEl.className = "text-button";
-    saveButtonEl.textContent = "Save";
-    saveButtonEl.title = `Overwrite ${name}`;
-    saveButtonEl.addEventListener("click", () => save(null));
-
-    const saveAsButtonEl = document.createElement("button");
-    saveAsButtonEl.type = "button";
-    saveAsButtonEl.className = "text-button";
-    saveAsButtonEl.textContent = "Save as…";
-    saveAsButtonEl.title = "Save the edited image as a new file";
-    saveAsButtonEl.addEventListener("click", async () => {
+    async function saveAs(transforms = pending) {
       const dialog = window.__TAURI__.dialog;
       if (!dialog) return;
       setBusy(true);
@@ -277,24 +326,279 @@ window.addEventListener("DOMContentLoaded", async () => {
         setBusy(false);
       }
       if (destination) {
-        await save(destination);
+        await save(destination, transforms);
       }
+    }
+
+    function textButton(label, title, onClick) {
+      const buttonEl = document.createElement("button");
+      buttonEl.type = "button";
+      buttonEl.className = "text-button";
+      buttonEl.textContent = label;
+      buttonEl.title = title;
+      buttonEl.addEventListener("click", onClick);
+      return buttonEl;
+    }
+
+    function iconButton(label, icon, onClick) {
+      const buttonEl = document.createElement("button");
+      buttonEl.type = "button";
+      buttonEl.className = "nav-button";
+      buttonEl.title = label;
+      buttonEl.setAttribute("aria-label", label);
+      buttonEl.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>`;
+      buttonEl.addEventListener("click", onClick);
+      return buttonEl;
+    }
+
+    const editGroupEl = document.createElement("span");
+    editGroupEl.className = "image-tool-group";
+    for (const [transform, { label, icon }] of Object.entries(PREVIEW_TRANSFORMS)) {
+      editGroupEl.append(iconButton(label, icon, () => setPending([...pending, transform])));
+    }
+    editGroupEl.append(iconButton("Crop", CROP_ICON, () => enterCrop()));
+
+    saveGroupEl.append(
+      textButton("Save", `Overwrite ${name}`, () => save(null)),
+      textButton("Save as…", "Save the edited image as a new file", () => saveAs()),
+    );
+
+    // The crop area is kept as fractions of the image as currently displayed (after any
+    // pending rotations and flips), which is how the backend applies it after those edits.
+    const MIN_CROP_PX = 8;
+    let selection = null;
+    let cropResizeObserver = null;
+
+    const cropOverlayEl = document.createElement("div");
+    cropOverlayEl.className = "crop-overlay";
+    cropOverlayEl.tabIndex = -1;
+    cropOverlayEl.hidden = true;
+    const cropShadeEl = document.createElement("div");
+    cropShadeEl.className = "crop-shade";
+    const cropBoxEl = document.createElement("div");
+    cropBoxEl.className = "crop-box";
+    const cropSizeEl = document.createElement("span");
+    cropSizeEl.className = "crop-size";
+    cropBoxEl.append(cropSizeEl);
+    for (const handle of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
+      const handleEl = document.createElement("span");
+      handleEl.className = "crop-handle";
+      handleEl.dataset.handle = handle;
+      cropBoxEl.append(handleEl);
+    }
+    const cropMaskEl = document.createElement("div");
+    cropMaskEl.className = "crop-mask";
+    cropMaskEl.append(cropShadeEl);
+    cropOverlayEl.append(cropMaskEl, cropBoxEl);
+    frameEl.append(cropOverlayEl);
+
+    const cropGroupEl = document.createElement("span");
+    cropGroupEl.className = "image-save-group";
+    cropGroupEl.hidden = true;
+    cropGroupEl.append(
+      textButton("Save", `Crop and overwrite ${name}`, () => save(null, cropTransforms())),
+      textButton("Save as…", "Crop and save as a new file", () => saveAs(cropTransforms())),
+      textButton("Cancel", "Cancel cropping", () => exitCrop()),
+    );
+
+    function cropTransforms() {
+      const { x, y, w, h } = selection;
+      return [...pending, { crop: { x, y, width: w, height: h } }];
+    }
+
+    function displayedPixelSize() {
+      const quarterTurn = imageEl.classList.contains("quarter-turn");
+      return quarterTurn
+        ? { width: imageEl.naturalHeight, height: imageEl.naturalWidth }
+        : { width: imageEl.naturalWidth, height: imageEl.naturalHeight };
+    }
+
+    function renderSelection() {
+      const { x, y, w, h } = selection;
+      for (const el of [cropShadeEl, cropBoxEl]) {
+        el.style.left = `${x * 100}%`;
+        el.style.top = `${y * 100}%`;
+        el.style.width = `${w * 100}%`;
+        el.style.height = `${h * 100}%`;
+      }
+      const { width, height } = displayedPixelSize();
+      const pixels = (start, size, total) => Math.round((start + size) * total) - Math.round(start * total);
+      cropSizeEl.textContent = `${pixels(x, w, width)} × ${pixels(y, h, height)}`;
+    }
+
+    function layoutCropOverlay() {
+      if (!frameEl.isConnected) {
+        cropResizeObserver?.disconnect();
+        return;
+      }
+      const frameRect = frameEl.getBoundingClientRect();
+      const imageRect = imageEl.getBoundingClientRect();
+      cropOverlayEl.style.left = `${imageRect.left - frameRect.left}px`;
+      cropOverlayEl.style.top = `${imageRect.top - frameRect.top}px`;
+      cropOverlayEl.style.width = `${imageRect.width}px`;
+      cropOverlayEl.style.height = `${imageRect.height}px`;
+    }
+
+    async function enterCrop() {
+      if (selection) return;
+      setBusy(true);
+      // Measure the image only once it has loaded and any rotate/flip animation has settled.
+      await imageEl.decode().catch(() => {});
+      await Promise.all(imageEl.getAnimations().map((animation) => animation.finished)).catch(() => {});
+      setBusy(false);
+      if (!frameEl.isConnected || selection) return;
+
+      selection = { x: 0, y: 0, w: 1, h: 1 };
+      editGroupEl.hidden = true;
+      saveGroupEl.hidden = true;
+      cropGroupEl.hidden = false;
+      cropOverlayEl.hidden = false;
+      layoutCropOverlay();
+      renderSelection();
+      cropResizeObserver = new ResizeObserver(layoutCropOverlay);
+      cropResizeObserver.observe(frameEl);
+      document.addEventListener("keydown", onCropKeydown, true);
+      cropOverlayEl.focus();
+      statusBarEl.textContent = "Drag to choose the crop area · Enter to save · Esc to cancel";
+    }
+
+    function exitCrop() {
+      if (!selection) return;
+      selection = null;
+      cropResizeObserver?.disconnect();
+      cropResizeObserver = null;
+      document.removeEventListener("keydown", onCropKeydown, true);
+      cropOverlayEl.hidden = true;
+      cropGroupEl.hidden = true;
+      editGroupEl.hidden = false;
+      saveGroupEl.hidden = pending.length === 0;
+    }
+
+    // Captured on the document so the shortcuts work wherever focus is, and so Enter
+    // doesn't also reach the file list (which would open the file).
+    function onCropKeydown(e) {
+      if (!frameEl.isConnected) {
+        document.removeEventListener("keydown", onCropKeydown, true);
+        return;
+      }
+      if (e.key !== "Enter" && e.key !== "Escape") return;
+      // Leave typing in the address/search boxes and activating focused buttons alone.
+      if (e.target.closest?.("input, textarea")) return;
+      if (e.key === "Enter" && e.target.closest?.("button")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat || busy) return;
+      if (e.key === "Enter") {
+        save(null, cropTransforms());
+      } else {
+        exitCrop();
+      }
+    }
+
+    cropOverlayEl.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || !selection) return;
+      e.preventDefault();
+      cropOverlayEl.focus();
+      const bounds = cropOverlayEl.getBoundingClientRect();
+      const minW = Math.min(MIN_CROP_PX / bounds.width, 1);
+      const minH = Math.min(MIN_CROP_PX / bounds.height, 1);
+      const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+      const pointAt = (event) => ({
+        x: clamp((event.clientX - bounds.left) / bounds.width, 0, 1),
+        y: clamp((event.clientY - bounds.top) / bounds.height, 0, 1),
+      });
+      const start = pointAt(e);
+      const origin = { ...selection };
+      const mode = e.target.dataset.handle ?? (cropBoxEl.contains(e.target) ? "move" : "new");
+
+      function onMove(event) {
+        const point = pointAt(event);
+        if (mode === "move") {
+          selection.x = clamp(origin.x + point.x - start.x, 0, 1 - origin.w);
+          selection.y = clamp(origin.y + point.y - start.y, 0, 1 - origin.h);
+        } else if (mode === "new") {
+          selection = {
+            x: Math.min(start.x, point.x),
+            y: Math.min(start.y, point.y),
+            w: Math.abs(point.x - start.x),
+            h: Math.abs(point.y - start.y),
+          };
+        } else {
+          let left = origin.x;
+          let top = origin.y;
+          let right = origin.x + origin.w;
+          let bottom = origin.y + origin.h;
+          if (mode.includes("w")) left = Math.min(point.x, right - minW);
+          if (mode.includes("e")) right = Math.max(point.x, left + minW);
+          if (mode.includes("n")) top = Math.min(point.y, bottom - minH);
+          if (mode.includes("s")) bottom = Math.max(point.y, top + minH);
+          selection = { x: left, y: top, w: right - left, h: bottom - top };
+        }
+        renderSelection();
+      }
+
+      function onEnd() {
+        cropOverlayEl.removeEventListener("pointermove", onMove);
+        cropOverlayEl.removeEventListener("pointerup", onEnd);
+        cropOverlayEl.removeEventListener("pointercancel", onEnd);
+        // A click without a real drag keeps the previous area.
+        if (selection && (selection.w < minW || selection.h < minH)) {
+          selection = origin;
+          renderSelection();
+        }
+      }
+
+      cropOverlayEl.setPointerCapture(e.pointerId);
+      cropOverlayEl.addEventListener("pointermove", onMove);
+      cropOverlayEl.addEventListener("pointerup", onEnd);
+      cropOverlayEl.addEventListener("pointercancel", onEnd);
     });
 
-    saveGroupEl.append(saveButtonEl, saveAsButtonEl);
-    toolbarEl.append(saveGroupEl);
+    toolbarEl.append(editGroupEl, saveGroupEl, cropGroupEl);
 
-    viewerEl.append(toolbarEl, frameEl, previewCaption(path));
+    viewerEl.append(toolbarEl, frameEl, caption.el);
     rightPanelEl.replaceChildren(viewerEl);
     rightPanelEl.scrollTop = 0;
   }
 
+  // The file name plus a line of file details and, for images and videos, a line of media details.
   function previewCaption(path) {
-    const captionEl = document.createElement("div");
-    captionEl.className = "preview-caption";
-    captionEl.textContent = baseName(path);
-    captionEl.title = path;
-    return captionEl;
+    const el = document.createElement("div");
+    el.className = "preview-caption";
+    const nameEl = document.createElement("div");
+    nameEl.className = "preview-name";
+    nameEl.textContent = baseName(path);
+    nameEl.title = path;
+    const fileLineEl = document.createElement("div");
+    fileLineEl.className = "preview-info";
+    const mediaLineEl = document.createElement("div");
+    mediaLineEl.className = "preview-info";
+    el.append(nameEl, fileLineEl, mediaLineEl);
+
+    const setLine = (lineEl, parts) => {
+      lineEl.textContent = parts.filter(Boolean).join("  ·  ");
+      lineEl.hidden = !lineEl.textContent;
+    };
+    setLine(fileLineEl, []);
+    setLine(mediaLineEl, []);
+
+    async function refresh() {
+      const requestId = previewId;
+      try {
+        const info = await window.__TAURI__.core.invoke("file_info", { path });
+        if (requestId !== previewId) return;
+        setLine(fileLineEl, [
+          formatSize(info.size),
+          info.modifiedAt != null && `Updated ${new Date(info.modifiedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`,
+        ]);
+        if (info.image) setLine(mediaLineEl, imageInfoParts(info.image));
+      } catch (error) {
+        console.error("Could not load file info:", error);
+      }
+    }
+    refresh();
+
+    return { el, refresh, setMediaInfo: (parts) => setLine(mediaLineEl, parts) };
   }
 
   const TEXT_PREVIEW_TYPES = ["text", "code"];
@@ -330,7 +634,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const frameEl = document.createElement("div");
     frameEl.className = "image-frame file-frame";
     frameEl.append(createIcon(type, itemEl.classList.contains("entry-shortcut"), 96));
-    viewerEl.append(frameEl, previewCaption(path));
+    viewerEl.append(frameEl, previewCaption(path).el);
     rightPanelEl.replaceChildren(viewerEl);
     if (isTextPreviewable(itemEl, type)) {
       showText(frameEl, path, requestId);
@@ -392,7 +696,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     timeEl.className = "video-time";
     controlsEl.append(playButtonEl, seekEl, timeEl);
 
-    viewerEl.append(frameEl, controlsEl, previewCaption(path));
+    const caption = previewCaption(path);
+    viewerEl.append(frameEl, controlsEl, caption.el);
     rightPanelEl.replaceChildren(viewerEl);
     rightPanelEl.scrollTop = 0;
 
@@ -401,7 +706,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     let state = "paused";
     let lengthMs = 0;
     let seeking = false;
-    stopActiveVideo = () => {
+    stopActivePreview = () => {
       stopped = true;
       if (id !== null) invoke("video_close", { id }).catch(() => {});
     };
@@ -421,8 +726,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     function showError() {
-      stopActiveVideo?.();
-      stopActiveVideo = null;
+      stopActivePreview?.();
+      stopActivePreview = null;
       const messageEl = document.createElement("p");
       messageEl.className = "grid-message";
       messageEl.textContent = `Cannot play ${name}`;
@@ -531,8 +836,395 @@ window.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     render(0);
+    invoke("video_info", { id })
+      .then((info) => {
+        if (!stopped) caption.setMediaInfo(videoInfoParts(info));
+      })
+      .catch((error) => console.error("Could not load video info:", error));
     pumpFrames();
     pollStatus();
+  }
+
+  const PDF_ICONS = {
+    previous: '<path d="M6 15l6-6 6 6"/>',
+    next: '<path d="M6 9l6 6 6-6"/>',
+  };
+
+  let pdfjsPromise = null;
+  function loadPdfjs() {
+    pdfjsPromise ??= import("./vendor/pdfjs/pdf.min.mjs").then((pdfjs) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdfjs/pdf.worker.min.mjs", import.meta.url).href;
+      return pdfjs;
+    });
+    pdfjsPromise.catch(() => (pdfjsPromise = null));
+    return pdfjsPromise;
+  }
+
+  // Renders one page at a time with pdf.js, fitted to the preview area.
+  async function showPdf(itemEl) {
+    const requestId = nextPreview();
+    const path = itemEl.dataset.path;
+    const name = baseName(path);
+
+    const viewerEl = document.createElement("div");
+    viewerEl.className = "image-viewer";
+    const toolbarEl = document.createElement("div");
+    toolbarEl.className = "image-toolbar pdf-toolbar";
+    toolbarEl.hidden = true;
+    const frameEl = document.createElement("div");
+    frameEl.className = "image-frame file-frame";
+    frameEl.append(createIcon("pdf", itemEl.classList.contains("entry-shortcut"), 96));
+    const caption = previewCaption(path);
+    viewerEl.append(toolbarEl, frameEl, caption.el);
+    rightPanelEl.replaceChildren(viewerEl);
+    rightPanelEl.scrollTop = 0;
+
+    function pageButton(label, icon, onClick) {
+      const buttonEl = document.createElement("button");
+      buttonEl.type = "button";
+      buttonEl.className = "nav-button";
+      buttonEl.title = label;
+      buttonEl.setAttribute("aria-label", label);
+      buttonEl.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>`;
+      buttonEl.addEventListener("click", onClick);
+      return buttonEl;
+    }
+    const previousButtonEl = pageButton("Previous page (↑)", PDF_ICONS.previous, () => goTo(pageNumber - 1));
+    const nextButtonEl = pageButton("Next page (↓)", PDF_ICONS.next, () => goTo(pageNumber + 1));
+    const pageInputEl = document.createElement("input");
+    // A text box rather than type="number": the native spinner counts down on ▼, but here down means the next page.
+    pageInputEl.type = "text";
+    pageInputEl.inputMode = "numeric";
+    pageInputEl.autocomplete = "off";
+    pageInputEl.spellcheck = false;
+    pageInputEl.className = "pdf-page-input";
+    pageInputEl.setAttribute("aria-label", "Page number");
+    const pageCountEl = document.createElement("span");
+    pageCountEl.className = "pdf-page-count";
+
+    // Edits are kept per page (rotate/flip as seen on screen) until the user saves them.
+    const pendingEdits = new Map();
+    const editGroupEl = document.createElement("span");
+    editGroupEl.className = "image-tool-group pdf-edit-group";
+    for (const [transform, { label, icon }] of Object.entries(PREVIEW_TRANSFORMS)) {
+      editGroupEl.append(pageButton(`${label} (this page)`, icon, () => editPage(transform)));
+    }
+    const saveGroupEl = document.createElement("span");
+    saveGroupEl.className = "image-save-group";
+    saveGroupEl.hidden = true;
+    function textButton(label, title, onClick) {
+      const buttonEl = document.createElement("button");
+      buttonEl.type = "button";
+      buttonEl.className = "text-button";
+      buttonEl.textContent = label;
+      buttonEl.title = title;
+      buttonEl.addEventListener("click", onClick);
+      return buttonEl;
+    }
+    saveGroupEl.append(
+      textButton("Save", `Overwrite ${name}`, () => save(null)),
+      textButton("Save as…", "Save the edited PDF as a new file", () => saveAs()),
+    );
+    toolbarEl.append(previousButtonEl, nextButtonEl, pageInputEl, pageCountEl, editGroupEl, saveGroupEl);
+
+    const canvasEl = document.createElement("canvas");
+    canvasEl.className = "pdf-page";
+
+    let pdf = null;
+    let loadingTask = null;
+    let renderTask = null;
+    let resizeObserver = null;
+    let pageNumber = 1;
+    let stopped = false;
+    let busy = false;
+    stopActivePreview = () => {
+      stopped = true;
+      resizeObserver?.disconnect();
+      rightPanelEl.removeEventListener("keydown", onKeydown);
+      renderTask?.cancel();
+      (pdf ?? loadingTask)?.destroy();
+    };
+
+    // Folds a page's pending edits into an extra clockwise rotation followed by on-screen flips.
+    function pageView(number) {
+      let angle = 0;
+      let flipX = false;
+      let flipY = false;
+      for (const transform of pendingEdits.get(number) ?? []) {
+        if (transform === "rotate90") {
+          // Turning a flipped page swaps which screen axis the flip is on.
+          angle = (angle + 90) % 360;
+          [flipX, flipY] = [flipY, flipX];
+        } else if (transform === "flipHorizontal") {
+          flipX = !flipX;
+        } else {
+          flipY = !flipY;
+        }
+      }
+      return { angle, flipX, flipY };
+    }
+
+    function editedPageCount() {
+      return [...pendingEdits.keys()].filter((number) => {
+        const { angle, flipX, flipY } = pageView(number);
+        return angle || flipX || flipY;
+      }).length;
+    }
+
+    function updateStatus() {
+      const edited = editedPageCount();
+      saveGroupEl.hidden = edited === 0;
+      const editedText = edited ? ` · ${edited} ${edited === 1 ? "page" : "pages"} edited` : "";
+      statusBarEl.textContent = `${name} — page ${pageNumber} of ${pdf.numPages}${editedText}`;
+    }
+
+    function editPage(transform) {
+      if (!pdf || busy) return;
+      pendingEdits.set(pageNumber, [...(pendingEdits.get(pageNumber) ?? []), transform]);
+      updateStatus();
+      renderPage();
+    }
+
+    function setBusy(value) {
+      busy = value;
+      toolbarEl.querySelectorAll("button, input").forEach((el) => (el.disabled = value));
+      if (!value && pdf) {
+        previousButtonEl.disabled = pageNumber <= 1;
+        nextButtonEl.disabled = pageNumber >= pdf.numPages;
+      }
+    }
+
+    function pdfEditedCopyPath() {
+      const dot = name.lastIndexOf(".");
+      const stem = dot > 0 ? name.slice(0, dot) : name;
+      return `${path.slice(0, path.length - name.length)}${stem}-edited.pdf`;
+    }
+
+    async function save(destination) {
+      if (!pdf || busy) return;
+      const edits = [...pendingEdits]
+        .filter(([number]) => {
+          const { angle, flipX, flipY } = pageView(number);
+          return angle || flipX || flipY;
+        })
+        .map(([page, transforms]) => ({ page, transforms }));
+      setBusy(true);
+      let unlockWindow = lockWindow(`Saving ${baseName(destination ?? path)}…`);
+      try {
+        await window.__TAURI__.core.invoke("transform_pdf", { path, edits, destination });
+        if (destination) {
+          pendingEdits.clear();
+          renderPage();
+          updateStatus();
+          statusBarEl.textContent = `Saved as ${baseName(destination)}`;
+        } else {
+          // Reopen the saved file before dropping the pending edits so the page never flashes back.
+          const saved = await openPdf();
+          if (stopped) {
+            saved.destroy();
+            return;
+          }
+          const previous = pdf;
+          pdf = saved;
+          pendingEdits.clear();
+          await renderPage();
+          previous.destroy();
+          caption.refresh();
+          updateStatus();
+          statusBarEl.textContent = `Saved ${name}`;
+        }
+      } catch (error) {
+        unlockWindow();
+        unlockWindow = () => {};
+        console.error("Could not save PDF:", error);
+        statusBarEl.textContent = `Failed to save ${name}`;
+        await alertDialog(`Failed to save ${name}.\n${error}`);
+      } finally {
+        unlockWindow();
+        setBusy(false);
+      }
+    }
+
+    async function saveAs() {
+      const dialog = window.__TAURI__.dialog;
+      if (!dialog || !pdf || busy) return;
+      setBusy(true);
+      let destination;
+      try {
+        destination = await dialog.save({
+          defaultPath: pdfEditedCopyPath(),
+          filters: [{ name: "PDF", extensions: ["pdf"] }],
+        });
+      } finally {
+        setBusy(false);
+      }
+      if (destination) {
+        await save(destination);
+      }
+    }
+
+    function showError(message) {
+      const messageEl = document.createElement("p");
+      messageEl.className = "grid-message";
+      messageEl.textContent = message;
+      frameEl.classList.add("file-frame");
+      frameEl.replaceChildren(messageEl);
+      toolbarEl.hidden = true;
+    }
+
+    async function renderPage() {
+      const number = pageNumber;
+      renderTask?.cancel();
+      renderTask = null;
+      try {
+        const page = await pdf.getPage(number);
+        if (stopped || number !== pageNumber) return;
+        const { angle, flipX, flipY } = pageView(number);
+        const rotation = (page.rotate + angle) % 360;
+        // Fit the page inside the frame, then render at device resolution for sharp text.
+        const unscaled = page.getViewport({ scale: 1, rotation });
+        const margin = 16;
+        const fit = Math.min(
+          (frameEl.clientWidth - margin) / unscaled.width,
+          (frameEl.clientHeight - margin) / unscaled.height,
+        );
+        if (!(fit > 0)) return;
+        const outputScale = window.devicePixelRatio || 1;
+        const viewport = page.getViewport({ scale: fit * outputScale, rotation });
+        // Draw off-screen first so the old page stays visible until the new one is ready.
+        const targetEl = document.createElement("canvas");
+        targetEl.width = Math.floor(viewport.width);
+        targetEl.height = Math.floor(viewport.height);
+        renderTask?.cancel();
+        renderTask = page.render({ canvas: targetEl, canvasContext: targetEl.getContext("2d"), viewport });
+        await renderTask.promise;
+        if (stopped || number !== pageNumber) return;
+        canvasEl.width = targetEl.width;
+        canvasEl.height = targetEl.height;
+        canvasEl.style.width = `${targetEl.width / outputScale}px`;
+        canvasEl.style.height = `${targetEl.height / outputScale}px`;
+        canvasEl.style.transform = flipX || flipY ? `scale(${flipX ? -1 : 1}, ${flipY ? -1 : 1})` : "";
+        canvasEl.getContext("2d").drawImage(targetEl, 0, 0);
+        if (!canvasEl.isConnected) {
+          frameEl.classList.remove("file-frame");
+          frameEl.replaceChildren(canvasEl);
+        }
+      } catch (error) {
+        if (stopped || error?.name === "RenderingCancelledException") return;
+        console.error("Could not render PDF page:", error);
+        showError(`Cannot show page ${number} of ${name}`);
+      }
+    }
+
+    function goTo(number) {
+      if (!pdf) return;
+      const clamped = Math.min(Math.max(Math.round(number) || 1, 1), pdf.numPages);
+      pageInputEl.value = String(clamped);
+      if (clamped === pageNumber && canvasEl.isConnected) return;
+      pageNumber = clamped;
+      previousButtonEl.disabled = pageNumber <= 1;
+      nextButtonEl.disabled = pageNumber >= pdf.numPages;
+      updateStatus();
+      renderPage();
+    }
+
+    function onKeydown(e) {
+      if (!pdf || busy || e.altKey || e.ctrlKey || e.metaKey) return;
+      // The page box handles its own arrows and Enter.
+      if (e.target === pageInputEl) return;
+      const target = {
+        ArrowUp: pageNumber - 1,
+        PageUp: pageNumber - 1,
+        ArrowLeft: pageNumber - 1,
+        ArrowDown: pageNumber + 1,
+        PageDown: pageNumber + 1,
+        ArrowRight: pageNumber + 1,
+        Home: 1,
+        End: pdf.numPages,
+      }[e.key];
+      if (target === undefined) return;
+      e.preventDefault();
+      goTo(target);
+    }
+
+    function goToTyped() {
+      const typed = Number.parseInt(pageInputEl.value.trim(), 10);
+      if (Number.isFinite(typed)) {
+        goTo(typed);
+      } else {
+        pageInputEl.value = String(pageNumber);
+      }
+    }
+
+    pageInputEl.addEventListener("change", goToTyped);
+    pageInputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        goToTyped();
+        pageInputEl.select();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        goTo(pageNumber + (e.key === "ArrowDown" ? 1 : -1));
+        pageInputEl.select();
+      } else if (e.key === "Escape") {
+        pageInputEl.value = String(pageNumber);
+        rightPanelEl.focus();
+      }
+    });
+    pageInputEl.addEventListener("focus", () => pageInputEl.select());
+    // Clicking the page gives the preview keyboard focus so Up/Down turn pages.
+    frameEl.addEventListener("pointerdown", () => rightPanelEl.focus());
+
+    async function openPdf() {
+      const pdfjs = await loadPdfjs();
+      const base = new URL("./vendor/pdfjs/", import.meta.url).href;
+      const task = pdfjs.getDocument({
+        // The query string keeps a re-opened file from being served from the cache.
+        url: `${window.__TAURI__.core.convertFileSrc(path)}?v=${Date.now()}`,
+        // The asset protocol caps each range response, so fetch the whole file at once.
+        disableRange: true,
+        disableStream: true,
+        cMapUrl: `${base}cmaps/`,
+        cMapPacked: true,
+        standardFontDataUrl: `${base}standard_fonts/`,
+        wasmUrl: `${base}wasm/`,
+        iccUrl: `${base}iccs/`,
+      });
+      if (!pdf) loadingTask = task;
+      return task.promise;
+    }
+
+    try {
+      if (stopped) return;
+      pdf = await openPdf();
+    } catch (error) {
+      if (stopped || requestId !== previewId) return;
+      console.error("Could not open PDF:", error);
+      showError(error?.name === "PasswordException" ? `${name} is password protected` : `Cannot preview ${name}`);
+      statusBarEl.textContent = `Cannot preview ${name}`;
+      return;
+    }
+    if (stopped) return;
+
+    pageCountEl.textContent = `/ ${pdf.numPages}`;
+    pageInputEl.style.width = `${String(pdf.numPages).length + 3}ch`;
+    toolbarEl.hidden = false;
+    rightPanelEl.addEventListener("keydown", onKeydown);
+    pageNumber = 0;
+    goTo(1);
+
+    pdf.getPage(1).then((page) => {
+      if (stopped) return;
+      const [, , width, height] = page.view;
+      caption.setMediaInfo([`${pdf.numPages} ${pdf.numPages === 1 ? "page" : "pages"}`, pdfPageSize(width, height)]);
+    }).catch(() => {});
+
+    let resizeTimer = 0;
+    resizeObserver = new ResizeObserver(() => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => !stopped && renderPage(), 100);
+    });
+    resizeObserver.observe(frameEl);
   }
 
   async function showPreview(itemEl) {
@@ -542,6 +1234,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
     if (itemEl.classList.contains("entry-type-video")) {
       showVideo(itemEl);
+      return;
+    }
+    if (itemEl.classList.contains("entry-type-pdf")) {
+      showPdf(itemEl);
       return;
     }
     if (itemEl.classList.contains("entry-file")) {
@@ -711,11 +1407,11 @@ function sortEntries(entries) {
   );
 }
 
-function renderGrid(containerEl, entries) {
+function renderGrid(containerEl, entries, { emptyMessage = "This folder is empty" } = {}) {
   if (entries.length === 0) {
     const messageEl = document.createElement("p");
     messageEl.className = "grid-message";
-    messageEl.textContent = "This folder is empty";
+    messageEl.textContent = emptyMessage;
     containerEl.replaceChildren(messageEl);
     return;
   }
@@ -798,4 +1494,64 @@ function formatModified(date, now = new Date()) {
     return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+const SIZE_UNITS = ["KB", "MB", "GB", "TB"];
+
+function formatSize(bytes) {
+  const exact = `${bytes.toLocaleString()} bytes`;
+  if (bytes < 1024) return exact;
+  let value = bytes;
+  let unit = -1;
+  do {
+    value /= 1024;
+    unit++;
+  } while (value >= 1024 && unit < SIZE_UNITS.length - 1);
+  return `${exact} (${value.toFixed(value < 10 ? 1 : 0)} ${SIZE_UNITS[unit]})`;
+}
+
+const roundTo = (value, digits) => Number(value.toFixed(digits));
+
+function imageInfoParts(image) {
+  const { x, y } = image.resolution ?? {};
+  return [
+    image.format,
+    `${image.width} × ${image.height} px (${roundTo((image.width * image.height) / 1e6, 1)} MP)`,
+    image.bitsPerChannel ? `${image.colorModel}, ${image.bitsPerChannel}-bit` : image.colorModel,
+    image.resolution && (roundTo(x, 0) === roundTo(y, 0) ? `${roundTo(x, 0)} ppi` : `${roundTo(x, 0)} × ${roundTo(y, 0)} ppi`),
+  ];
+}
+
+function videoInfoParts(video) {
+  const audio = video.audioCodec && [
+    video.audioCodec,
+    video.audioChannels && (video.audioChannels === 1 ? "mono" : video.audioChannels === 2 ? "stereo" : `${video.audioChannels} ch`),
+    video.audioSampleRate && `${roundTo(video.audioSampleRate / 1000, 1)} kHz`,
+  ].filter(Boolean).join(" ");
+  return [
+    video.width > 0 && `${video.width} × ${video.height} px`,
+    video.frameRate && `${roundTo(video.frameRate, 2)} fps`,
+    video.videoCodec,
+    video.videoBitrate && `${roundTo(video.videoBitrate / 1e6, 1)} Mbps`,
+    audio && `Audio: ${audio}`,
+  ];
+}
+
+const PAPER_SIZES = [
+  ["A3", 297, 420],
+  ["A4", 210, 297],
+  ["A5", 148, 210],
+  ["B4", 257, 364],
+  ["B5", 182, 257],
+  ["Letter", 215.9, 279.4],
+  ["Legal", 215.9, 355.6],
+];
+
+// PDF sizes are in points (1/72 inch).
+function pdfPageSize(widthPt, heightPt) {
+  const toMm = (pt) => (pt * 25.4) / 72;
+  const [short, long] = [toMm(widthPt), toMm(heightPt)].sort((a, b) => a - b);
+  const paper = PAPER_SIZES.find(([, w, h]) => Math.abs(w - short) < 2 && Math.abs(h - long) < 2)?.[0];
+  const size = `${Math.round(toMm(widthPt))} × ${Math.round(toMm(heightPt))} mm`;
+  return paper ? `${paper} (${size})` : size;
 }

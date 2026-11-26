@@ -1,11 +1,11 @@
 use crate::{err::app_err::AppErr, models::settings::Settings};
 use tracing::error;
 
-static ALIGATOR_SETTINGS_FILE: &str = "~/.aligtor/settings.json";
+static SETTINGS_FILE: &str = "~/.image-editor/settings.json";
 
 impl Settings {
     pub fn load() -> Result<Self, AppErr> {
-        match Self::load_from_file(ALIGATOR_SETTINGS_FILE) {
+        match Self::load_from_file(SETTINGS_FILE) {
             Ok(settings) => Ok(settings),
             Err(e) => {
                 error!("Failed to load settings from file: {e}");
@@ -32,7 +32,7 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<(), AppErr> {
-        self.save_to_file(ALIGATOR_SETTINGS_FILE)
+        self.save_to_file(SETTINGS_FILE)
     }
 
     pub fn save_to_file(&self, file_path: &str) -> Result<(), AppErr> {
